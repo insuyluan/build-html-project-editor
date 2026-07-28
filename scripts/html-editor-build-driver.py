@@ -284,6 +284,10 @@ def install_and_build(root, app_dir, package, strategy):
         subprocess.run(["corepack", "enable"], cwd=str(install_dir), env=install_env, check=False)
 
     if manager == "pnpm":
+        # Remote builds run in an ephemeral runner without repository credentials.
+        # Match npm/yarn behavior by allowing native dependency installers such as
+        # esbuild and @swc/core to prepare their platform binaries.
+        install_env["npm_config_dangerously_allow_all_builds"] = "true"
         install = ["pnpm", "install", "--no-frozen-lockfile"]
         build = ["pnpm", "run", "build"]
         if strategy == "vite":
