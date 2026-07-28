@@ -40,6 +40,20 @@ def safe_archive_path(raw):
     return path
 
 
+def restore_executable_mode(destination, info):
+    archived_permissions = (info.external_attr >> 16) & 0o777
+    executable_bits = archived_permissions & 0o111
+    if executable_bits == 0:
+        with destination.open("rb") as extracted:
+            if extracted.read(2) == b"#!":
+                executable_bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if executable_bits == 0:
+        return False
+    current_mode = stat.S_IMODE(destination.stat().st_mode)
+    destination.chmod(current_mode | executable_bits)
+    return True
+
+
 def extract_source():
     if not SOURCE_ZIP.is_file():
         fail("Không tìm thấy source.zip trong Sandbox.")
@@ -47,6 +61,7 @@ def extract_source():
     SOURCE_DIR.mkdir(parents=True, exist_ok=True)
     total = 0
     count = 0
+    executable_count = 0
     with zipfile.ZipFile(SOURCE_ZIP) as archive:
         for info in archive.infolist():
             path = safe_archive_path(info.filename)
@@ -65,9 +80,13 @@ def extract_source():
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, destination.open("wb") as target:
                 shutil.copyfileobj(source, target, length=1024 * 1024)
+            if restore_executable_mode(destination, info):
+                executable_count += 1
     if count == 0:
         fail("ZIP không chứa tệp nguồn có thể build.")
     log(f"Đã giải nén {count} tệp · {total / 1024 / 1024:.1f} MB")
+    if executable_count:
+        log(f"Đã khôi phục quyền thực thi cho {executable_count} tệp script.")
 
     children = [item for item in SOURCE_DIR.iterdir() if item.name not in IGNORED]
     root_files = [item for item in children if item.is_file()]
@@ -356,3 +375,4 @@ if __name__ == "__main__":
     except Exception as error:
         print(f"HTML_EDITOR_ERROR:{error}", file=sys.stderr, flush=True)
         sys.exit(1)
+
