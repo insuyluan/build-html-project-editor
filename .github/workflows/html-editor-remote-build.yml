@@ -32,8 +32,6 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
       SOURCE_ASSET_ID: ${{ inputs.source_asset_id }}
       SOURCE_NAME: ${{ inputs.source_name }}
-      HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
-      HTML_EDITOR_BUILD_PROVIDER: github-actions
 
     steps:
       - name: Checkout builder
@@ -45,6 +43,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
         run: |
           set -euo pipefail
           mkdir -p "$HTML_EDITOR_WORKSPACE"
@@ -58,6 +57,9 @@ jobs:
         id: normalized_build
         continue-on-error: true
         shell: bash
+        env:
+          HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
+          HTML_EDITOR_BUILD_PROVIDER: github-actions
         run: |
           set -o pipefail
           python3 "$GITHUB_WORKSPACE/scripts/html-editor-build-driver.py" \
@@ -68,6 +70,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
         run: |
           set -euo pipefail
           gh release upload "$RELEASE_TAG" \
@@ -80,6 +83,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
         run: |
           set -euo pipefail
           test -f "$HTML_EDITOR_WORKSPACE/build-log.txt" \
