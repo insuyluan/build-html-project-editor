@@ -103,6 +103,19 @@ def package_dependencies(package):
 
 def detect_framework(package):
     deps = package_dependencies(package)
+    scripts = package.get("scripts") or {}
+    build_script = str(scripts.get("build") or "")
+    if (
+        "vinext" in deps
+        or "@vinext/cloudflare" in deps
+        or re.search(r"\bvinext\b", build_script)
+    ):
+        return (
+            "vinext-static",
+            "Vinext",
+            ["dist/client"],
+            "next",
+        )
     if "next" in deps:
         return ("next-static", "Next.js", ["out"], "next")
     if "@sveltejs/kit" in deps:
