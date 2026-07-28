@@ -1,0 +1,98 @@
+name: HTML Editor Remote Build
+run-name: HTML Editor Build ${{ inputs.release_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Temporary draft release tag
+        required: true
+        type: string
+      source_asset_id:
+        description: Source ZIP release asset ID
+        required: true
+        type: string
+      source_name:
+        description: Original source filename
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: html-editor-build-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      SOURCE_ASSET_ID: ${{ inputs.source_asset_id }}
+      SOURCE_NAME: ${{ inputs.source_name }}
+      HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
+      HTML_EDITOR_BUILD_PROVIDER: github-actions
+
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download source ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HTML_EDITOR_WORKSPACE"
+          gh api \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$SOURCE_ASSET_ID" \
+            -H "Accept: application/octet-stream" \
+            > "$HTML_EDITOR_WORKSPACE/source.zip"
+          printf '%s' "$SOURCE_NAME" > "$HTML_EDITOR_WORKSPACE/source-name.txt"
+
+      - name: Build normalized static output
+        id: normalized_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/html-editor-build-driver.py" \
+            2>&1 | tee "$HTML_EDITOR_WORKSPACE/build-log.txt"
+
+      - name: Upload result
+        if: steps.normalized_build.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "$HTML_EDITOR_WORKSPACE/result.zip" \
+            "$HTML_EDITOR_WORKSPACE/build-log.txt" \
+            --clobber
+
+      - name: Upload failure details
+        if: always() && steps.normalized_build.outcome != 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -f "$HTML_EDITOR_WORKSPACE/build-log.txt" \
+            || printf '%s\n' "Build failed before logs were produced." \
+              > "$HTML_EDITOR_WORKSPACE/build-log.txt"
+          cp "$HTML_EDITOR_WORKSPACE/build-log.txt" \
+            "$HTML_EDITOR_WORKSPACE/build-error.txt"
+          gh release upload "$RELEASE_TAG" \
+            "$HTML_EDITOR_WORKSPACE/build-log.txt" \
+            "$HTML_EDITOR_WORKSPACE/build-error.txt" \
+            --clobber
+
+      - name: Mark failed build
+        if: always() && steps.normalized_build.outcome != 'success'
+        shell: bash
+        run: exit 1
