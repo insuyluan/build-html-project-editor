@@ -173,25 +173,26 @@ def patch_next_config(app_dir):
     source = selected.read_text("utf-8") if selected.is_file() else ""
     if not source.strip():
         selected.write_text(
-            "const nextConfig={output:'export',trailingSlash:true,images:{unoptimized:true}};\\n"
-            "export default nextConfig;\\n",
+            "const nextConfig={output:'export',trailingSlash:true,images:{unoptimized:true}};\n"
+            "export default nextConfig;\n",
             "utf-8",
         )
         return selected.name
 
-    common = re.search(r"\\bmodule\\.exports\\s*=\\s*([\\s\\S]+)$", source)
-    esm = re.search(r"\\bexport\\s+default\\s+([\\s\\S]+)$", source)
-    match = common or esm
+    esm = re.search(r"\bexport\s+default\s+", source)
+    common = re.search(r"\bmodule\.exports\s*=\s*", source)
+    match = esm or common
     if not match:
-        source += (
-            "\\nconst __htmlEditorFallbackConfig={output:'export',trailingSlash:true,"
-            "images:{unoptimized:true}};\\nexport default __htmlEditorFallbackConfig;\\n"
+        fail(
+            f"Không thể chuẩn hóa {selected.name}: cần `export default` "
+            "hoặc `module.exports =`."
         )
-    else:
-        expression = match.group(1).strip().rstrip(";")
-        prefix = source[:match.start()]
-        wrapper = f"""
-const __htmlEditorOriginalConfig = {expression};
+    expression_source = source[match.end():].strip()
+    if not expression_source:
+        fail(f"Không thể đọc giá trị export trong {selected.name}.")
+    prefix = source[:match.start()]
+    wrapper = f"""const __htmlEditorOriginalConfig = {expression_source}
+
 const __htmlEditorNormalizeConfig = value => ({{
   ...(value || {{}}),
   output: 'export',
@@ -202,15 +203,19 @@ const __htmlEditorStaticConfig = typeof __htmlEditorOriginalConfig === 'function
   ? async (...args) => __htmlEditorNormalizeConfig(await __htmlEditorOriginalConfig(...args))
   : __htmlEditorNormalizeConfig(__htmlEditorOriginalConfig);
 """
-        ending = "module.exports=__htmlEditorStaticConfig;\\n" if common else "export default __htmlEditorStaticConfig;\\n"
-        source = prefix + wrapper + ending
-    selected.write_text(source, "utf-8")
+    ending = (
+        "module.exports = __htmlEditorStaticConfig;\n"
+        if common and not esm
+        else "export default __htmlEditorStaticConfig;\n"
+    )
+    source = prefix + wrapper + ending
+    selected.write_text(source.rstrip() + "\n", "utf-8")
     return selected.name
 
 
 def package_manager(root, app_dir, package):
     declared = str(package.get("packageManager") or "")
-    match = re.match(r"^(npm|pnpm|yarn|bun)(?:@[^+\\s]+)?", declared)
+    match = re.match(r"^(npm|pnpm|yarn|bun)(?:@[^+\s]+)?", declared)
     if match:
         return match.group(1)
     for directory in (root, app_dir):
@@ -338,7 +343,7 @@ def create_result(output_name, output_dir, adapter, framework, source_name):
         "builder": os.environ.get("HTML_EDITOR_BUILD_PROVIDER", "remote-build"),
     }
     manifest_path = output_dir / "html-editor-build-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\\n", "utf-8")
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", "utf-8")
     if RESULT_ZIP.exists():
         RESULT_ZIP.unlink()
     with zipfile.ZipFile(RESULT_ZIP, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
@@ -375,4 +380,3 @@ if __name__ == "__main__":
     except Exception as error:
         print(f"HTML_EDITOR_ERROR:{error}", file=sys.stderr, flush=True)
         sys.exit(1)
-
