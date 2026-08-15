@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "workflowFile": ".github/workflows/html-editor-remote-build.yml",
+  "driverFile": "scripts/html-editor-build-driver.py",
+  "nodeVersion": "22.14.0"
+}
