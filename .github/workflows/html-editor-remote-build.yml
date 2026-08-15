@@ -32,12 +32,21 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
       SOURCE_ASSET_ID: ${{ inputs.source_asset_id }}
       SOURCE_NAME: ${{ inputs.source_name }}
+      HTML_EDITOR_BUILD_PROVIDER: github-actions
+      HTML_EDITOR_BUILDER_PROTOCOL: "2"
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
     steps:
       - name: Checkout builder
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Setup stable Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          check-latest: false
 
       - name: Download source ZIP
         shell: bash
@@ -59,7 +68,6 @@ jobs:
         shell: bash
         env:
           HTML_EDITOR_WORKSPACE: ${{ runner.temp }}/html-editor-build
-          HTML_EDITOR_BUILD_PROVIDER: github-actions
         run: |
           set -o pipefail
           python3 "$GITHUB_WORKSPACE/scripts/html-editor-build-driver.py" \
