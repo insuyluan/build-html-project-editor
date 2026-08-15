@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import zipfile
+from collections import deque
 from pathlib import Path, PurePosixPath
 
 WORKSPACE = Path(os.environ.get("HTML_EDITOR_WORKSPACE", "/workspace")).resolve()
@@ -16,6 +17,7 @@ SOURCE_DIR = WORKSPACE / "source"
 RESULT_ZIP = WORKSPACE / "result.zip"
 MAX_FILES = 20_000
 MAX_BYTES = 350 * 1024 * 1024
+BUILD_WARNINGS = []
 IGNORED = {
     ".git", "node_modules", ".next", ".nuxt", ".output", ".parcel-cache",
     ".svelte-kit", ".turbo", "coverage", "__MACOSX",
@@ -28,6 +30,14 @@ def log(message):
 
 def fail(message):
     raise RuntimeError(message)
+
+
+class CommandFailure(RuntimeError):
+    def __init__(self, command, code, output):
+        super().__init__(f"Lệnh {command[0]} thất bại với mã {code}.")
+        self.command = command
+        self.code = code
+        self.output = output
 
 
 def safe_archive_path(raw):
@@ -105,6 +115,8 @@ def detect_framework(package):
     deps = package_dependencies(package)
     scripts = package.get("scripts") or {}
     build_script = str(scripts.get("build") or "")
+    if "expo" in deps or "expo-router" in deps:
+        return ("expo-static", "Expo / React Native", ["dist"], "expo")
     if (
         "vinext" in deps
         or "@vinext/cloudflare" in deps
@@ -172,9 +184,9 @@ def choose_package(root):
     candidates.sort(key=lambda item: item[0], reverse=True)
     _, path, package = candidates[0]
     scripts = package.get("scripts") or {}
-    if not str(scripts.get("build") or "").strip():
-        fail('package.json chưa có script "build".')
     adapter, framework, outputs, strategy = detect_framework(package)
+    if strategy != "expo" and not str(scripts.get("build") or "").strip():
+        fail('package.json chưa có script "build".')
     return path.parent, package, adapter, framework, outputs, strategy
 
 
@@ -186,7 +198,8 @@ def patch_next_config(app_dir):
     source = selected.read_text("utf-8") if selected.is_file() else ""
     if not source.strip():
         selected.write_text(
-            "const nextConfig={output:'export',trailingSlash:true,images:{unoptimized:true}};\n"
+            "const nextConfig={output:'export',trailingSlash:true,images:{unoptimized:true},"
+            "typescript:{ignoreBuildErrors:true},eslint:{ignoreDuringBuilds:true}};\n"
             "export default nextConfig;\n",
             "utf-8",
         )
@@ -197,8 +210,8 @@ def patch_next_config(app_dir):
     match = esm or common
     if not match:
         fail(
-            f"Không thể chuẩn hóa {selected.name}: cần `export default` "
-            "hoặc `module.exports =`."
+            f"Không thể chuẩn hóa {selected.name}: cần 'export default' "
+            "hoặc 'module.exports ='."
         )
     expression_source = source[match.end():].strip()
     if not expression_source:
@@ -211,6 +224,8 @@ const __htmlEditorNormalizeConfig = value => ({{
   output: 'export',
   trailingSlash: value && typeof value.trailingSlash === 'boolean' ? value.trailingSlash : true,
   images: {{ ...((value && value.images) || {{}}), unoptimized: true }},
+  typescript: {{ ...((value && value.typescript) || {{}}), ignoreBuildErrors: true }},
+  eslint: {{ ...((value && value.eslint) || {{}}), ignoreDuringBuilds: true }},
 }});
 const __htmlEditorStaticConfig = typeof __htmlEditorOriginalConfig === 'function'
   ? async (...args) => __htmlEditorNormalizeConfig(await __htmlEditorOriginalConfig(...args))
@@ -222,6 +237,35 @@ const __htmlEditorStaticConfig = typeof __htmlEditorOriginalConfig === 'function
         else "export default __htmlEditorStaticConfig;\n"
     )
     source = prefix + wrapper + ending
+    selected.write_text(source.rstrip() + "\n", "utf-8")
+    return selected.name
+
+
+def patch_expo_metro_config(app_dir):
+    selected = app_dir / "metro.config.js"
+    marker = "html-editor-expo-web-adapter"
+    source = selected.read_text("utf-8") if selected.is_file() else ""
+    if marker in source:
+        return selected.name
+    if not source.strip():
+        source = """const { getDefaultConfig } = require('expo/metro-config');
+const config = getDefaultConfig(__dirname);
+config.resolver = config.resolver || {};
+config.resolver.assetExts = Array.from(new Set([...(config.resolver.assetExts || []), 'wasm']));
+module.exports = config;
+// html-editor-expo-web-adapter
+"""
+    else:
+        source = source.rstrip() + """
+
+// html-editor-expo-web-adapter
+;(() => {
+  const current = module.exports || {};
+  current.resolver = current.resolver || {};
+  current.resolver.assetExts = Array.from(new Set([...(current.resolver.assetExts || []), 'wasm']));
+  module.exports = current;
+})();
+"""
     selected.write_text(source.rstrip() + "\n", "utf-8")
     return selected.name
 
@@ -243,6 +287,7 @@ def package_manager(root, app_dir, package):
 
 def run(command, cwd, env):
     log("$ " + " ".join(command))
+    output = deque(maxlen=240)
     process = subprocess.Popen(
         command,
         cwd=str(cwd),
@@ -254,18 +299,83 @@ def run(command, cwd, env):
     )
     assert process.stdout is not None
     for line in process.stdout:
-        print(line.rstrip(), flush=True)
+        line = line.rstrip()
+        output.append(line)
+        print(line, flush=True)
     code = process.wait()
     if code != 0:
-        fail(f"Lệnh {command[0]} thất bại với mã {code}.")
+        raise CommandFailure(command, code, "\n".join(output))
+
+
+def is_typecheck_failure(error):
+    output = str(getattr(error, "output", ""))
+    return bool(re.search(
+        r"(?:\bType error\b|\berror TS\d{4}\b|\bvue-tsc\b|"
+        r"\bsvelte-check\b|Found \d+ errors?)",
+        output,
+        re.IGNORECASE,
+    ))
+
+
+def compatibility_build_command(manager, package, strategy):
+    dependencies = package_dependencies(package)
+    if strategy == "vite":
+        return package_binary_command(manager, "vite", ["build", "--base", "./"])
+    if strategy == "next":
+        executable = "vinext" if "vinext" in dependencies or "@vinext/cloudflare" in dependencies else "next"
+        return package_binary_command(manager, executable, ["build"])
+    return None
+
+
+def run_build_with_type_compatibility(build, manager, package, strategy, app_dir, build_env):
+    try:
+        run(build, app_dir, build_env)
+    except CommandFailure as error:
+        fallback = compatibility_build_command(manager, package, strategy)
+        if not fallback or not is_typecheck_failure(error):
+            raise
+        warning = (
+            "TypeScript compatibility fallback: kiểm tra kiểu của project thất bại; "
+            "đang chạy trực tiếp static bundler để tạo bản xem trước có thể chỉnh sửa."
+        )
+        BUILD_WARNINGS.append(warning)
+        log(warning)
+        run(fallback, app_dir, build_env)
+
+
+def package_binary_command(manager, executable, arguments):
+    if manager == "pnpm":
+        return ["pnpm", "exec", executable] + arguments
+    if manager == "yarn":
+        return ["yarn", executable] + arguments
+    if manager == "bun":
+        return ["bunx", executable] + arguments
+    return ["npx", "--no-install", executable] + arguments
+
+
+def package_script_command(manager, script):
+    if manager == "pnpm":
+        return ["pnpm", "run", script]
+    if manager == "yarn":
+        return ["yarn", "run", script]
+    if manager == "bun":
+        return ["bun", "run", script]
+    return ["npm", "run", script]
 
 
 def install_and_build(root, app_dir, package, strategy):
     manager = package_manager(root, app_dir, package)
     install_dir = root if (root / "package.json").is_file() else app_dir
+    runtime_home = WORKSPACE / ".html-editor-home"
+    npm_cache = WORKSPACE / ".html-editor-npm-cache"
+    runtime_home.mkdir(parents=True, exist_ok=True)
+    npm_cache.mkdir(parents=True, exist_ok=True)
     base_env = dict(os.environ)
     base_env.update({
         "CI": "true",
+        "HOME": str(runtime_home),
+        "npm_config_cache": str(npm_cache),
+        "NPM_CONFIG_CACHE": str(npm_cache),
         "NEXT_TELEMETRY_DISABLED": "1",
         "NUXT_TELEMETRY_DISABLED": "1",
         "ASTRO_TELEMETRY_DISABLED": "1",
@@ -323,7 +433,45 @@ def install_and_build(root, app_dir, package, strategy):
             install_dir,
             install_env,
         )
-    run(build, app_dir, build_env)
+
+    if strategy == "expo":
+        deps = package_dependencies(package)
+        missing = [
+            name for name in (
+                "react-dom",
+                "react-native-web",
+                "@expo/metro-runtime",
+                "babel-preset-expo",
+            )
+            if name not in deps
+        ]
+        if missing:
+            log("Expo Web Adapter: bổ sung " + ", ".join(missing))
+            run(
+                package_binary_command(manager, "expo", ["install"] + missing),
+                app_dir,
+                install_env,
+            )
+        else:
+            log("Expo Web Adapter: dependency chuẩn đã sẵn sàng.")
+        scripts = package.get("scripts") or {}
+        build = (
+            package_script_command(manager, "export:web")
+            if str(scripts.get("export:web") or "").strip()
+            else package_binary_command(
+                manager,
+                "expo",
+                ["export", "--platform", "web", "--output-dir", "dist", "--clear"],
+            )
+        )
+    run_build_with_type_compatibility(
+        build,
+        manager,
+        package,
+        strategy,
+        app_dir,
+        build_env,
+    )
     return manager
 
 
@@ -362,6 +510,8 @@ def create_result(output_name, output_dir, adapter, framework, source_name):
         "totalBytes": total,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "builder": os.environ.get("HTML_EDITOR_BUILD_PROVIDER", "remote-build"),
+        "builderProtocol": int(os.environ.get("HTML_EDITOR_BUILDER_PROTOCOL", "2")),
+        "warnings": list(BUILD_WARNINGS),
     }
     manifest_path = output_dir / "html-editor-build-manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", "utf-8")
@@ -383,12 +533,27 @@ def main():
         else "source.zip"
     )
     root = extract_source()
+    node_version = subprocess.run(
+        ["node", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip() or "unavailable"
+    log(
+        "Builder protocol "
+        + os.environ.get("HTML_EDITOR_BUILDER_PROTOCOL", "2")
+        + " · Node "
+        + node_version
+    )
     app_dir, package, adapter, framework, outputs, strategy = choose_package(root)
     log(f"Workspace: {root.relative_to(WORKSPACE)} · App: {app_dir.relative_to(root) or Path('.')}")
     log(f"Build Adapter: {framework} · output {' / '.join(outputs)}")
     if strategy == "next":
         selected = patch_next_config(app_dir)
         log(f"Next adapter: {selected} → static export")
+    if strategy == "expo":
+        selected = patch_expo_metro_config(app_dir)
+        log(f"Expo adapter: {selected} → Web/WASM static export")
     manager = install_and_build(root, app_dir, package, strategy)
     output_name, output_dir = find_output(app_dir, outputs)
     log(f"Package manager: {manager}")
