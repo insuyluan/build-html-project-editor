@@ -20,6 +20,11 @@ Bộ này tạo static ZIP chuẩn hóa cho HTML Project Editor bằng GitHub Ac
 Editor tạo một draft release tạm, tải source.zip lên, kích hoạt workflow,
 nhận result.zip rồi xóa release và tag tạm. Token chỉ được lưu trong phiên tab.
 
+Builder protocol 2 cố định Node.js 22.14.0
+để runner GitHub cập nhật không làm thay đổi kết quả của cùng một ZIP. Nếu script
+build dừng chỉ vì TypeScript trong khi bundler vẫn có thể tạo static output, driver
+sẽ thử lại bằng bundler tương thích và ghi cảnh báo rõ trong build-log/manifest.
+
 ## Giới hạn an toàn
 
 - Source ZIP: tối đa 30 MB
